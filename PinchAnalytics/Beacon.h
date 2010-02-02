@@ -26,6 +26,7 @@
 	NSString * clientData;
 	sqlite3 * db;
 	sqlite3_stmt * deleteStmt, *insertStmt,*updateTimeStmt,*newRecords,*countStmt;
+	NSOperationQueue * syncQueue;
 }
 
 Beacon * shared;
@@ -35,10 +36,11 @@ Beacon * shared;
 
 - (void)startBeacon;
 - (void)endBeacon;
+- (void)logdbRows;
 
 - (void)startSubBeaconWithName:(NSString *)beaconName timeSession:(BOOL)trackSession;
 - (void)endSubBeaconWithName:(NSString *)beaconName;
-- (BOOL)synchronise;
+- (void)synchronise;
 - (void)setBeaconLocation:(CLLocation *)newLocation;
 
 @end

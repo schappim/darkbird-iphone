@@ -28,20 +28,16 @@
 }
 
 - (NSMutableDictionary *) beaconData {
-	// sqlite3_step(newRecords);
-// FIXME malloc is for suckers
-
 	int rowid = sqlite3_column_int(newRecords, 0);
 	NSString *event = [NSString stringWithUTF8String:(char *)sqlite3_column_text(newRecords, 1)];
 	NSLog(@"Beacon name %@", event);
-	NSString *start =  [NSDate dateWithTimeIntervalSinceReferenceDate:sqlite3_column_double(newRecords, 2)];
-	double duration=sqlite3_column_double(newRecords, 3);
+	double start   = sqlite3_column_double(newRecords, 2);
+	double duration =sqlite3_column_double(newRecords, 3);
 	NSMutableDictionary * dict = [[NSMutableDictionary alloc] init];
     [dict setValue:event forKey:@"name"];
 	[dict setValue:[NSNumber numberWithInteger:rowid] forKey:@"client_id"];
 
-	// FIXME
-	[dict setValue:@"dummy" forKey: @"recorded_at"];
+	[dict setValue:[NSNumber numberWithDouble:start] forKey: @"recorded_at"];
 	
 	if (duration!=0.0) {
 		[dict setValue:[NSNumber numberWithDouble:duration] forKey:@"duration"];
@@ -76,23 +72,42 @@ int check_sql(NSString * context, int errCode) {
 }
 
 
+// Operations wrapper - put a call to doSynch onto a queue.
+- (void) synchronise {
+	NSLog(@"Trying to sync");
+	NSInvocationOperation * op = [[NSInvocationOperation alloc] initWithTarget:self selector:@selector(foreverSync:) object:@"FOO"];
+	
+	
+//	NSInvocationOperation* theOp = [[[NSInvocationOperation alloc] initWithTarget:self
+//																		 selector:@selector(doSynch:)
+//									] autorelease];	
+	[syncQueue addOperation:op];
+}
+
+
+- (BOOL) foreverSync:(id) data {
+	while(true) {
+		[self oneSync];
+		sleep(5);
+	}
+}
+
 // synchronise current state with the server
-- (BOOL) synchronise {
+- (BOOL) oneSync {
 	NSLog(@"sync requested");
 	if (![self canConnect]) return YES; 
 	// only one request in flight, bitte.
-	if (![inFlight tryLock]) {
-		NSLog(@"couldn't lock inflight");
-		return YES; 
-	}
-	NSLog(@"locked inflight:%@", inFlight);
+//	if (![inFlight tryLock]) {
+//		NSLog(@"couldn't lock inflight");
+//		return YES; 
+//	}
+//	NSLog(@"locked inflight:%@", inFlight);
 	
 	NSArray * records = [shared outstandingRecords];
 	int rc = [records count];
-	NSLog(@"got %d records",rc);
 	if (rc == 0) {
 		NSLog(@"Nothing to report");
-		[inFlight unlock];
+		// [inFlight unlock];
 		return YES; 
 	}
 	NSLog(@"here?");
@@ -123,15 +138,24 @@ int check_sql(NSString * context, int errCode) {
 	do {
 		i = (i+1) % [servers count];
 
+
+		
+
 		[request setURL:[NSURL URLWithString:[servers objectAtIndex:i]]];
-		[backtobase initWithRequest:request delegate:self];
-		if(backtobase) {
+		NSURLResponse * resp = [NSURLResponse alloc];
+		NSData * d = [NSURLConnection sendSynchronousRequest:request returningResponse:&resp error:NULL];
+		
+//		[backtobase initWithRequest:request delegate:self];
+//		if(backtobase) {
 			NSLog(@"Trying to connect to %@", [servers objectAtIndex:i]);
+		[self saveData:d];
+		return;
 			//NSLog(@"lock state: %@", inFlight);
 			//[inFlight unlock];
 			// NSLog(@"unlocked inflight: %@", inFlight);
-			return YES;
-		}
+//			return YES;
+//		}
+		
 		NSLog(@"Couldn't connect to %@", [servers objectAtIndex:i]);
 	} while (i != startServer);
 	NSLog(@"couldn't connect to any host");
@@ -146,6 +170,8 @@ int check_sql(NSString * context, int errCode) {
 	inFlight = [[NSLock alloc] init];
 	[inFlight setName:@"in flight"];
 	NSLog(@"got inFlight");
+	
+	deleteStmt = insertStmt = updateTimeStmt = newRecords = countStmt = NULL;
 	servers = [[NSArray alloc] initWithObjects:
 			   @"http://127.0.0.1:4567/report",nil]; // FIXME https for prod. pull servers out.
 	NSLog(@"got the servers");
@@ -158,8 +184,8 @@ int check_sql(NSString * context, int errCode) {
 		NSLog(@"oops, db failed");
 	}
 	// create the tables - no-op if they exist already
-//	check_sql(@"creation", sqlite3_exec(db, "drop table beacons;", NULL, NULL, NULL));
-	check_sql(@"creation", sqlite3_exec(db, "create table if not exists beacons (ROWID INTEGER PRIMARY KEY autoincrement, beacon TEXT, start REAL, duration REAL);", NULL, NULL, NULL));
+	check_sql(@"creation", sqlite3_exec(db, "drop table beacons;", NULL, NULL, NULL));
+	check_sql(@"creation", sqlite3_exec(db, "create table if not exists beacons (ROWID INTEGER PRIMARY KEY autoincrement, beacon TEXT not null, start REAL not null, duration REAL);", NULL, NULL, NULL));
 	
 
 	// check for SQLITE_OK here
@@ -171,8 +197,9 @@ int check_sql(NSString * context, int errCode) {
 	// multiple identically named beacons and quibbling about ordering of cancelling is a bit silly,
 	// especially since this can only break if we overflow rowids and have to start from scratch.
     //check_sql(@"update", sqlite3_prepare_v2(db, "update beacons set duration=start-? where beacon=? order by ROWID limit 1", -1, &updateTimeStmt, NULL));
-	check_sql(@"update", sqlite3_prepare_v2(db, "update beacons set duration=start-? where beacon=?", -1, &updateTimeStmt, NULL));
-	check_sql(@"count", sqlite3_prepare_v2(db, "select count(*) from beacons;", -1, &countStmt, NULL));
+	// argh, doesn't work with this version of sqlite anyway.
+	check_sql(@"update", sqlite3_prepare_v2(db, "update beacons set duration=?-start where beacon=?", -1, &updateTimeStmt, NULL));
+	check_sql(@"count", sqlite3_prepare_v2(db, "select count(*) from beacons", -1, &countStmt, NULL));
 	UIDevice * device = [UIDevice currentDevice];
 	NSDictionary* dict = [NSDictionary dictionaryWithObjectsAndKeys:
 									[device uniqueIdentifier], @"udid",
@@ -184,7 +211,10 @@ int check_sql(NSString * context, int errCode) {
 		
 	// TODO hash the UDID somehow, don't want to send it back in the clear.
 	clientData = [[dict JSONRepresentation] retain];
-	NSLog(@"initialised,, bitches");
+	syncQueue = [[NSOperationQueue alloc] init];
+	// one at a time, no shoving.
+	[syncQueue setMaxConcurrentOperationCount:1];
+
 	return self;
 }
 
@@ -219,30 +249,17 @@ int check_sql(NSString * context, int errCode) {
 		  [error localizedDescription],
 		  [[error userInfo] objectForKey:NSErrorFailingURLStringKey]);
 	[inFlight unlock];
-	
+	// and given that we failed, might as well try again after a rest...
+	// how do we do a non-blocking rest, anyway?
+	sleep(5);
+	[self synchronise];
 }
 
 - (void)connectionDidFinishLoading:(NSURLConnection *)connection
 {
 
 	NSLog(@"Succeeded! Received %d bytes of data",[responseData length]);
-
-	NSString * resp = [[NSString alloc] initWithData:responseData encoding:NSASCIIStringEncoding];
-    NSLog(@"Response: %@", resp);
-	NSArray * recorded = [[resp JSONValue] objectForKey:@"recorded_ids"];
-	// boo, sqlite won't take an array to "delete from blah where id in [...]"
-	// can we do anything with callbacks? would be good to have this be a quick op.
-	NSEnumerator * e = [recorded objectEnumerator];
-	id i;
-	while(i=[e nextObject]) {
-		NSLog(@"Really deleting %d...",[i intValue]);
-		check_sql(@"bind",sqlite3_bind_int(deleteStmt, 1, [i intValue] ));
-		check_sql(@"deleting row", sqlite3_step(deleteStmt));
-		sqlite3_reset(deleteStmt);
-		sqlite3_step(countStmt);
-		NSLog(@"%d rows left in db", sqlite3_column_int(countStmt, 0));
-		sqlite3_reset(countStmt);
-	}
+	[self saveData];
 	// release the connection, and the data object
 	// [connection release];
 	NSLog(@"unlocking %@", inFlight);
@@ -252,6 +269,33 @@ int check_sql(NSString * context, int errCode) {
 	// [responseData release];
 	// aaaaand go again
 	[shared synchronise];
+	
+}
+
+- (void)saveData:(NSData *) response {
+	NSString * resp = [[NSString alloc] initWithData:response encoding:NSASCIIStringEncoding];
+    NSLog(@"Response: %@", resp);
+	NSArray * recorded = [[resp JSONValue] objectForKey:@"recorded_ids"];
+	// boo, sqlite won't take an array to "delete from blah where id in [...]"
+	// can we do anything with callbacks? would be good to have this be a quick op.
+	NSEnumerator * e = [recorded objectEnumerator];
+	id i;
+	[self logdbRows];
+	while(i=[e nextObject]) {
+		NSLog(@"Really deleting %d...",[i intValue]);
+		check_sql(@"bind",sqlite3_bind_int(deleteStmt, 1, [i intValue] ));
+		check_sql(@"deleting row", sqlite3_step(deleteStmt));
+		sqlite3_reset(deleteStmt);
+		[self logdbRows];
+	}
+	[self logdbRows];
+	NSLog(@"%d rows left in db", sqlite3_column_int(countStmt, 0));
+	sqlite3_reset(countStmt);
+}
+
+- (void) logdbRows {
+	NSLog(@"First: %d rows left in db", sqlite3_column_int(countStmt, 0));
+	sqlite3_reset(countStmt);
 }
 
 
@@ -308,13 +352,17 @@ int check_sql(NSString * context, int errCode) {
 	}
 	check_sql(@"insertion", sqlite3_step(insertStmt));
 	sqlite3_reset(insertStmt);
-	[self synchronise];
+	// [self synchronise];
+	[self logdbRows];
 }
 
 - (void)endSubBeaconWithName:(NSString *)beaconName {
 	sqlite3_bind_double(updateTimeStmt, 1, [NSDate timeIntervalSinceReferenceDate]);
 	sqlite3_bind_text(updateTimeStmt, 2, [beaconName UTF8String], -1, SQLITE_STATIC);
 	sqlite3_step(updateTimeStmt);
+	sqlite3_reset(updateTimeStmt);
+	
+	[self logdbRows];
 }
 
 - (void)setBeaconLocation:(CLLocation *)newLocation {
